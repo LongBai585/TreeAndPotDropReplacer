@@ -1,0 +1,2 @@
+# TreeAndPotDropReplacer
+一个TShock插件，用于替换泰拉瑞亚中摇树和砸罐子的掉落物，有概率生成巨石弹幕
