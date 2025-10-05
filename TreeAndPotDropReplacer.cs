@@ -1,9 +1,12 @@
 using System;
 using System.ComponentModel;
 using System.IO;
+using System.Collections.Generic;
 using Terraria;
+using Terraria.ID;
 using TerrariaApi.Server;
 using TShockAPI;
+using Microsoft.Xna.Framework;
 
 namespace TreeAndPotDropReplacer
 {
@@ -11,13 +14,16 @@ namespace TreeAndPotDropReplacer
     public class TreeAndPotDropReplacer : TerrariaPlugin
     {
         public override string Name => "TreeAndPotDropReplacer";
-        public override Version Version => new Version(1, 0, 0);
+        public override Version Version => new Version(1, 1, 0);
         public override string Author => "泷白";
-        public override string Description => "替换摇树和砸罐子的掉落物";
+        public override string Description => "额外的掉落物";
 
         private static string configPath;
         public static Config Config { get; set; }
         private Random random = new Random();
+        
+        // 树叶瓦片类型
+        private readonly HashSet<ushort> _leafTiles = new HashSet<ushort> { 384, 385 };
 
         public TreeAndPotDropReplacer(Main game) : base(game)
         {
@@ -32,15 +38,37 @@ namespace TreeAndPotDropReplacer
             // 注册命令
             Commands.ChatCommands.Add(new Command("treepotreplacer.reload", ReloadConfig, "tadrreload"));
             
-            // 使用TileEdit事件
-            GetDataHandlers.TileEdit += OnTileEdit;
+            // 输出插件信息到控制台
+            TShock.Log.ConsoleInfo($"=== {Name} v{Version} 已加载 ===");
+            TShock.Log.ConsoleInfo($"作者: {Author}");
+            TShock.Log.ConsoleInfo($"描述: {Description}");
+            TShock.Log.ConsoleInfo("==============================");
+            
+            // 直接应用Hook
+            try
+            {
+                // Hook世界生成方法
+                On.Terraria.WorldGen.ShakeTree += OnShakeTree;
+                On.Terraria.WorldGen.KillTile += OnKillTile;
+                
+                TShock.Log.ConsoleInfo($"[{Name}] Hook已成功应用！");
+            }
+            catch (Exception ex)
+            {
+                TShock.Log.ConsoleError($"[{Name}] 应用Hook时出错: {ex}");
+                throw;
+            }
         }
 
         protected override void Dispose(bool disposing)
         {
             if (disposing)
             {
-                GetDataHandlers.TileEdit -= OnTileEdit;
+                // 移除Hook
+                On.Terraria.WorldGen.ShakeTree -= OnShakeTree;
+                On.Terraria.WorldGen.KillTile -= OnKillTile;
+                
+                TShock.Log.ConsoleInfo($"[{Name}] 插件已卸载！");
             }
             base.Dispose(disposing);
         }
@@ -52,17 +80,18 @@ namespace TreeAndPotDropReplacer
                 if (File.Exists(configPath))
                 {
                     Config = Config.Read(configPath);
+                    TShock.Log.ConsoleInfo($"[{Name}] 配置加载成功!");
                 }
                 else
                 {
                     Config = new Config();
                     Config.Write(configPath);
+                    TShock.Log.ConsoleInfo($"[{Name}] 默认配置文件已创建!");
                 }
-                TShock.Log.ConsoleInfo("[TreeAndPotDropReplacer] 配置加载成功!");
             }
             catch (Exception ex)
             {
-                TShock.Log.ConsoleError($"[TreeAndPotDropReplacer] 加载配置时出错: {ex}");
+                TShock.Log.ConsoleError($"[{Name}] 加载配置时出错: {ex}");
                 Config = new Config();
             }
         }
@@ -70,72 +99,121 @@ namespace TreeAndPotDropReplacer
         private void ReloadConfig(CommandArgs args)
         {
             LoadConfig();
-            args.Player.SendSuccessMessage("[TreeAndPotDropReplacer] 配置已重新加载！");
+            args.Player.SendSuccessMessage($"[{Name}] 配置已重新加载！");
         }
 
-        private void OnTileEdit(object sender, GetDataHandlers.TileEditEventArgs args)
+        // 摇树处理方法 - 修改为从树叶上方掉落
+        private void OnShakeTree(On.Terraria.WorldGen.orig_ShakeTree orig, int x, int y)
         {
-            try
+            // 先调用原版方法
+            orig(x, y);
+            
+            // 检查概率
+            if (random.NextDouble() * 100 < Config.ReplaceChance)
             {
-                TSPlayer player = args.Player;
-                if (player == null || !player.Active || player.TPlayer == null)
-                    return;
-
-                // 检查是否是破坏行为（编辑类型为0表示破坏）
-                if (args.EditData != 0)
-                    return;
-
-                int tileX = args.X;
-                int tileY = args.Y;
-                
-                // 检查坐标是否有效
-                if (tileX < 0 || tileX >= Main.maxTilesX || tileY < 0 || tileY >= Main.maxTilesY)
-                    return;
-
-                // 修复错误1: 直接使用Main.tile而不是转换为Tile
-                ITile tile = Main.tile[tileX, tileY];
-                if (tile == null || !tile.active())
-                    return;
-
-                // 检查是否是树或罐子
-                bool isTree = IsTreeTile(tile.type);
-                bool isPot = tile.type == 28; // 罐子Tile ID
-
-                if (!isTree && !isPot)
-                    return;
-
-                // 根据概率决定是否替换掉落物
-                if (random.NextDouble() * 100 < Config.ReplaceChance)
+                try
                 {
-                    // 生成巨石弹幕
-                    SpawnBoulderProjectile(player);
-
-                    // 发送提示信息
-                    if (Config.ShowMessage)
-                    {
-                        string itemName = isTree ? "树" : "罐子";
-                        player.SendWarningMessage($"[TreeAndPotDropReplacer] {itemName}掉落物已被替换为巨石弹幕！");
-                    }
-
-                    // 阻止原版掉落
-                    args.Handled = true;
+                    // 查找树叶位置
+                    int leafY = FindLeafTop(x, y);
                     
-                    TShock.Log.ConsoleDebug($"[TreeAndPotDropReplacer] 为玩家 {player.Name} 在位置 ({tileX}, {tileY}) 生成了巨石弹幕");
+                    if (leafY > 0)
+                    {
+                        // 从树叶上方生成巨石
+                        SpawnBoulderFromLeafTop(x, leafY);
+                        
+                        if (Config.ShowMessage)
+                        {
+                            // 向附近玩家发送消息
+                            foreach (TSPlayer player in TShock.Players)
+                            {
+                                if (player != null && player.Active && 
+                                    Math.Abs(player.TileX - x) < 50 && Math.Abs(player.TileY - y) < 50)
+                                {
+                                    player.SendWarningMessage($"[{Name}] 摇树掉落物有概率触发额外掉落！");
+                                }
+                            }
+                        }
+                        
+                        TShock.Log.ConsoleDebug($"[{Name}] 在摇树位置 ({x}, {y}) 从树叶上方生成了巨石弹幕");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    TShock.Log.ConsoleError($"[{Name}] 处理摇树时出错: {ex}");
                 }
             }
-            catch (Exception ex)
+        }
+
+        // 使用KillTile来检测罐子破坏
+        private void OnKillTile(On.Terraria.WorldGen.orig_KillTile orig, int i, int j, bool fail, bool effectOnly, bool noItem)
+        {
+            ITile tile = Main.tile[i, j];
+            bool wasPot = tile.active() && tile.type == TileID.Pots;
+            
+            // 先调用原版方法
+            orig(i, j, fail, effectOnly, noItem);
+            
+            // 检查是否是罐子并且被成功破坏
+            if (wasPot && !fail && !effectOnly)
             {
-                TShock.Log.ConsoleError($"[TreeAndPotDropReplacer] 处理Tile编辑时出错: {ex}");
+                // 检查概率
+                if (random.NextDouble() * 100 < Config.ReplaceChance)
+                {
+                    try
+                    {
+                        // 生成巨石弹幕
+                        SpawnBoulderProjectile(i, j, false);
+                        
+                        if (Config.ShowMessage)
+                        {
+                            // 向附近玩家发送消息
+                            foreach (TSPlayer player in TShock.Players)
+                            {
+                                if (player != null && player.Active && 
+                                    Math.Abs(player.TileX - i) < 50 && Math.Abs(player.TileY - j) < 50)
+                                {
+                                    player.SendWarningMessage($"[{Name}] 砸罐子掉落物有概率触发额外掉落！");
+                                }
+                            }
+                        }
+                        
+                        TShock.Log.ConsoleDebug($"[{Name}] 在砸罐子位置 ({i}, {j}) 生成了巨石弹幕");
+                    }
+                    catch (Exception ex)
+                    {
+                        TShock.Log.ConsoleError($"[{Name}] 处理砸罐子时出错: {ex}");
+                    }
+                }
             }
         }
 
-        private bool IsTreeTile(ushort tileType)
+        // 查找树叶顶部位置
+        private int FindLeafTop(int x, int startY)
         {
-            // 普通树、棕榈树、红木树等
-            return tileType == 5 || tileType == 323 || tileType == 324;
+            int currentY = startY;
+            
+            // 向上查找树叶
+            while (currentY > 10)
+            {
+                ITile tile = Main.tile[x, currentY];
+                if (tile.active() && _leafTiles.Contains(tile.type))
+                {
+                    // 找到树叶，继续向上查找可能的更高树叶
+                    while (currentY > 10 && Main.tile[x, currentY - 1].active() && _leafTiles.Contains(Main.tile[x, currentY - 1].type))
+                    {
+                        currentY--;
+                    }
+                    return currentY;
+                }
+                currentY--;
+            }
+            
+            // 如果没有找到树叶，返回原始位置上方
+            return startY - 3;
         }
 
-        private void SpawnBoulderProjectile(TSPlayer player)
+        // 从树叶上方生成巨石
+        private void SpawnBoulderFromLeafTop(int x, int leafY)
         {
             try
             {
@@ -143,26 +221,89 @@ namespace TreeAndPotDropReplacer
                 int damage = Config.BoulderDamage;
                 float knockback = Config.BoulderKnockback;
                 
-                // 修复错误2: 使用正确的Projectile源创建方法
-                // 使用更兼容的Projectile.NewProjectile重载
+                // 在树叶上方生成巨石
+                float worldX = x * 16f + 8f + (float)(random.NextDouble() - 0.5) * 16f;
+                float worldY = leafY * 16f - 40f; // 在树叶上方40像素处生成
+                
+                // 设置向下掉落的速度
+                float velocityX = (float)(random.NextDouble() - 0.5) * 2f;
+                float velocityY = 1f + (float)random.NextDouble() * 2f; // 向下速度
+                
+                // 使用兼容的Projectile源
+                var projectileSource = Projectile.GetNoneSource();
+                
+                // 生成弹幕
                 int projectileIndex = Projectile.NewProjectile(
-                    Projectile.GetNoneSource(), // 使用静态方法获取projectile源
-                    player.TPlayer.position.X,
-                    player.TPlayer.position.Y - 32f,
-                    0f,
-                    0f,
+                    projectileSource,
+                    worldX,
+                    worldY,
+                    velocityX,
+                    velocityY,
                     projectileType,
                     damage,
                     knockback,
-                    player.Index
+                    Main.myPlayer
                 );
 
                 // 同步弹幕给所有玩家
-                NetMessage.SendData((int)PacketTypes.ProjectileNew, -1, -1, null, projectileIndex);
+                if (projectileIndex >= 0 && projectileIndex < Main.maxProjectiles && 
+                    Main.projectile[projectileIndex] != null && Main.projectile[projectileIndex].active)
+                {
+                    NetMessage.SendData((int)PacketTypes.ProjectileNew, -1, -1, null, projectileIndex);
+                }
             }
             catch (Exception ex)
             {
-                TShock.Log.ConsoleError($"[TreeAndPotDropReplacer] 生成巨石弹幕时出错: {ex}");
+                TShock.Log.ConsoleError($"[{Name}] 从树叶生成巨石弹幕时出错: {ex}");
+            }
+        }
+
+        // 罐子的巨石生成方法保持不变
+        private void SpawnBoulderProjectile(int tileX, int tileY, bool isTree)
+        {
+            try
+            {
+                int projectileType = Config.BoulderProjectileID;
+                int damage = Config.BoulderDamage;
+                float knockback = Config.BoulderKnockback;
+                
+                // 将Tile坐标转换为世界坐标
+                float worldX = tileX * 16f + 8f;
+                float worldY = tileY * 16f;
+                
+                // 在罐子上方生成
+                worldY -= 24f;
+                
+                // 添加随机速度
+                float velocityX = (float)(random.NextDouble() - 0.5) * 4f;
+                float velocityY = -2f - (float)random.NextDouble() * 2f;
+                
+                // 使用兼容的Projectile源
+                var projectileSource = Projectile.GetNoneSource();
+                
+                // 生成弹幕
+                int projectileIndex = Projectile.NewProjectile(
+                    projectileSource,
+                    worldX,
+                    worldY,
+                    velocityX,
+                    velocityY,
+                    projectileType,
+                    damage,
+                    knockback,
+                    Main.myPlayer
+                );
+
+                // 同步弹幕给所有玩家
+                if (projectileIndex >= 0 && projectileIndex < Main.maxProjectiles && 
+                    Main.projectile[projectileIndex] != null && Main.projectile[projectileIndex].active)
+                {
+                    NetMessage.SendData((int)PacketTypes.ProjectileNew, -1, -1, null, projectileIndex);
+                }
+            }
+            catch (Exception ex)
+            {
+                TShock.Log.ConsoleError($"[{Name}] 生成巨石弹幕时出错: {ex}");
             }
         }
     }
@@ -173,7 +314,7 @@ namespace TreeAndPotDropReplacer
         public float ReplaceChance { get; set; } = 20f;
 
         [Description("巨石弹幕的ID")]
-        public int BoulderProjectileID { get; set; } = 268;
+        public int BoulderProjectileID { get; set; } = 99;
 
         [Description("巨石弹幕的伤害值")]
         public int BoulderDamage { get; set; } = 80;
@@ -188,7 +329,6 @@ namespace TreeAndPotDropReplacer
         {
             if (!File.Exists(path))
             {
-                TShock.Log.ConsoleInfo("[TreeAndPotDropReplacer] 配置文件不存在，创建默认配置。");
                 return new Config();
             }
             
