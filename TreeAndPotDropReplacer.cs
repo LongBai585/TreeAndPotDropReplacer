@@ -14,7 +14,7 @@ namespace TreeAndPotDropReplacer
     public class TreeAndPotDropReplacer : TerrariaPlugin
     {
         public override string Name => "TreeAndPotDropReplacer";
-        public override Version Version => new Version(1, 1, 0);
+        public override Version Version => new Version(1, 0, 0);
         public override string Author => "泷白";
         public override string Description => "额外的掉落物";
 
