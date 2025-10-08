@@ -75,8 +75,7 @@
 · ShowMessage: 是否显示替换提示信息，默认 true
 
 # 权限节点
-
-· treepotreplacer.reload - 允许使用 /tadrreload 命令重载配置
+· treedrop.reload - 允许使用 /tadrreload 命令重载配置
 
 # 支持的Tile类型
 
